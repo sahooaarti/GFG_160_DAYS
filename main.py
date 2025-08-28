@@ -1,4 +1,3 @@
-import argparse
 import os
 import sys
 from typing import List, Optional
@@ -31,21 +30,13 @@ def safe_read_file(path: str) -> str:
         raise FileNotFoundError(f"File not found: {path}")
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate questions from content using an LLM")
-    parser.add_argument("file", help="Path to input content file")
-    parser.add_argument("--chapter", default="", help="Chapter title")
-    parser.add_argument("--grade", default="11", help="Grade or level")
-    parser.add_argument("--model", default="google/gemini-2.5-flash", help="OpenRouter model id")
-    parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
-    parser.add_argument("--num-questions", type=int, default=1, help="Number of questions to generate")
-    parser.add_argument("--types", default="", help="Comma-separated allowed types (mcq,multi,fill,match,subjective)")
-    parser.add_argument("--max-input-tokens", type=int, default=6000, help="Max input tokens used from content")
-    parser.add_argument("--max-output-tokens", type=int, default=1000, help="Max output tokens from model")
-    parser.add_argument("--timeout", default="10,60", help="Timeout seconds as connect,read (e.g., 10,60)")
-    parser.add_argument("--insert-db", action="store_true", help="Insert generated questions into the database")
-    parser.add_argument("--schema", default="", help="Optional path to schema.sql to init DB once")
-    return parser.parse_args(argv)
+def _prompt(prompt: str, default: Optional[str] = None) -> str:
+    msg = f"{prompt}"
+    if default is not None:
+        msg += f" [{default}]"
+    msg += ": "
+    val = input(msg).strip()
+    return val if val else (default or "")
 
 
 def _parse_types(types_csv: str) -> Optional[List[str]]:
@@ -68,45 +59,74 @@ def _parse_timeout(timeout_csv: str):
         return (10, 60)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    args = parse_args(argv)
+def main() -> int:
+    file_path = _prompt("Enter path to input content file")
+    chapter = _prompt("Enter chapter title (blank to use file name)", "")
+    grade = _prompt("Enter grade", "11")
+    model = _prompt("Enter model id", "google/gemini-2.5-flash")
+    temperature_str = _prompt("Enter temperature (float)", "0.6")
+    num_questions_str = _prompt("Enter number of questions (int)", "1")
+    types_csv = _prompt("Allowed types CSV (mcq,multi,fill,match,subjective) or blank for mix", "")
+    max_input_tokens_str = _prompt("Max input tokens", "6000")
+    max_output_tokens_str = _prompt("Max output tokens", "1000")
+    timeout_csv = _prompt("Timeout seconds as connect,read", "10,60")
 
-    content = safe_read_file(args.file)
+    try:
+        temperature = float(temperature_str)
+    except Exception:
+        temperature = 0.6
+    try:
+        num_questions = int(num_questions_str)
+    except Exception:
+        num_questions = 1
+    try:
+        max_input_tokens = int(max_input_tokens_str)
+    except Exception:
+        max_input_tokens = 6000
+    try:
+        max_output_tokens = int(max_output_tokens_str)
+    except Exception:
+        max_output_tokens = 1000
 
-    allowed_types = _parse_types(args.types)
-    timeout = _parse_timeout(args.timeout)
+    content = safe_read_file(file_path)
+    allowed_types = _parse_types(types_csv)
+    timeout = _parse_timeout(timeout_csv)
+
+    derived_chapter = chapter or os.path.splitext(os.path.basename(file_path))[0]
 
     result = generate_questions_from_llm(
         content,
-        args.chapter or os.path.splitext(os.path.basename(args.file))[0],
-        args.model,
-        args.temperature,
-        args.num_questions,
-        args.grade,
+        derived_chapter,
+        model,
+        temperature,
+        num_questions,
+        grade,
         allowed_types,
-        max_output_tokens=args.max_output_tokens,
-        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        max_input_tokens=max_input_tokens,
         timeout=timeout,
     )
 
-    print(json_dump := __import__("json").dumps(result["questions"], ensure_ascii=False, indent=2))
+    print(__import__("json").dumps(result["questions"], ensure_ascii=False, indent=2))
 
-    if args.insert_db:
+    insert_db_answer = _prompt("Insert generated questions into DB? (y/N)", "N").lower()
+    if insert_db_answer == "y":
         try:
             from question_db import init_db, insert_question_batch
         except Exception as exc:  # pragma: no cover
             print(f"DB import failed: {exc}", file=sys.stderr)
             return 0
 
-        if args.schema:
+        schema_path = _prompt("Path to schema.sql (blank to skip init)", "")
+        if schema_path:
             try:
-                init_db(args.schema)
+                init_db(schema_path)
             except Exception as exc:
                 print(f"DB init failed (continuing): {exc}", file=sys.stderr)
 
         common_base = {
-            "grade": args.grade,
-            "chapter": args.chapter or os.path.splitext(os.path.basename(args.file))[0],
+            "grade": grade,
+            "chapter": derived_chapter,
             "subject_name": os.getenv("SUBJECT_NAME", ""),
             "model": result["model"],
             "temperature": result["temperature"],
